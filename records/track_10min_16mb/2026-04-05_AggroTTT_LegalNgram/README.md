@@ -22,10 +22,10 @@ This directory is an implementation scaffold intended for cloud runs. The checke
 
 - 11-layer 512d banked GPT
 - XSA on all layers
-- BigramHash `3072 x 112`
+- BigramHash `2048 x 128` by default to preserve the original `0325` base recipe
 - AR self-generated Full GPTQ calibration
 - selective `±1` pruning to fit the artifact budget
-- split-LR defaults for later layers
+- training-side upgrades such as split-LR remain available behind env flags, but are off by default
 
 ### Added score-first TTT
 
@@ -112,7 +112,7 @@ done
 - `TTT_BATCH_SEQS=8`
 - `TTT_MOMENTUM=0.0`
 - `TTT_ROLLBACK_REL_TOL=0.01`
-- `SPLIT_LR_ENABLED=1`
+- `SPLIT_LR_ENABLED=0`
 - `SPLIT_LR_LAYER=6`
 - `SPLIT_LR_LATE_MULT=1.2`
 - `TOKEN_ORDER=16`
@@ -120,4 +120,4 @@ done
 - `WORD_ORDER=4`
 - `AGREE_ADD_BOOST=0.5`
 
-These are the defaults currently encoded in the record.
+The TTT and n-gram settings above are the current defaults. Base-training upgrades like split-LR remain opt-in so the record can cleanly fall back to the original `0325` training recipe.
