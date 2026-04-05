@@ -42,7 +42,7 @@ class Hyperparameters:
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 4000))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 500))
     iterations = int(os.environ.get("ITERATIONS", 20000))
-    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 3500))
+    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 4000))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 20))
     train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 786_432))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 2048))
@@ -64,6 +64,9 @@ class Hyperparameters:
     tied_embed_init_std = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
     matrix_lr = float(os.environ.get("MATRIX_LR", 0.025))
     scalar_lr = float(os.environ.get("SCALAR_LR", 0.025))
+    split_lr_enabled = bool(int(os.environ.get("SPLIT_LR_ENABLED", "1")))
+    split_lr_layer = int(os.environ.get("SPLIT_LR_LAYER", 6))
+    split_lr_late_mult = float(os.environ.get("SPLIT_LR_LATE_MULT", 1.2))
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.99))
     muon_backend_steps = int(os.environ.get("MUON_BACKEND_STEPS", 5))
     muon_momentum_warmup_start = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.92))
@@ -84,8 +87,8 @@ class Hyperparameters:
     muon_wd = float(os.environ.get("MUON_WD", 0.04))
     adam_wd = float(os.environ.get("ADAM_WD", 0.04))
     qat_enabled = bool(int(os.environ.get("QAT_ENABLED", "0")))
-    bigram_vocab_size = int(os.environ.get("BIGRAM_VOCAB_SIZE", 2048))
-    bigram_dim = int(os.environ.get("BIGRAM_DIM", 128))
+    bigram_vocab_size = int(os.environ.get("BIGRAM_VOCAB_SIZE", 3072))
+    bigram_dim = int(os.environ.get("BIGRAM_DIM", 112))
     trigram_enabled = bool(int(os.environ.get("TRIGRAM", "0")))  # TrigramHash (off by default, risky)
     xsa_last_n = int(os.environ.get("XSA_LAST_N", 11))  # XSA on ALL layers (our novel contribution)
     rope_dims = int(os.environ.get("ROPE_DIMS", 16))
@@ -102,13 +105,17 @@ class Hyperparameters:
     gptq_block_size = int(os.environ.get("GPTQ_BLOCK_SIZE", 128))
     smoke_test = bool(int(os.environ.get("SMOKE_TEST", "0")))
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "1")))
-    ttt_lr = float(os.environ.get("TTT_LR", 0.002))
-    ttt_epochs = int(os.environ.get("TTT_EPOCHS", 3))
-    ttt_chunk_tokens = int(os.environ.get("TTT_CHUNK_TOKENS", 32768))
-    ttt_freeze_blocks = int(os.environ.get("TTT_FREEZE_BLOCKS", 2))
-    ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
-    ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
-    ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_lr = float(os.environ.get("TTT_LR", 0.0005))
+    ttt_epochs = int(os.environ.get("TTT_EPOCHS", 1))
+    ttt_chunk_tokens = int(os.environ.get("TTT_CHUNK_TOKENS", 131072))
+    ttt_freeze_blocks = int(os.environ.get("TTT_FREEZE_BLOCKS", 6))
+    ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.0))
+    ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 8))
+    ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 0.5))
+    ttt_adapt_final_norm = bool(int(os.environ.get("TTT_ADAPT_FINAL_NORM", "1")))
+    ttt_reset_state_per_chunk = bool(int(os.environ.get("TTT_RESET_STATE_PER_CHUNK", "1")))
+    ttt_probe_batches = int(os.environ.get("TTT_PROBE_BATCHES", 2))
+    ttt_rollback_rel_tol = float(os.environ.get("TTT_ROLLBACK_REL_TOL", 0.01))
     online_ngram_enabled = bool(int(os.environ.get("ONLINE_NGRAM_ENABLED", "1")))
     online_ngram_batch_seqs = int(os.environ.get("ONLINE_NGRAM_BATCH_SEQS", 32))
 
@@ -569,6 +576,30 @@ def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
         for name, param in module.named_parameters():
             if (param.ndim < 2 or any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)) and param.dtype != torch.float32:
                 param.data = param.data.float()
+
+
+def block_index_from_name(name: str) -> int | None:
+    head = name.split(".", 1)[0]
+    return int(head) if head.isdigit() else None
+
+
+def apply_split_lr_bank_grad_scale(model: nn.Module, args: Hyperparameters) -> None:
+    if not args.split_lr_enabled or args.split_lr_late_mult == 1.0:
+        return
+    split = min(max(args.split_lr_layer, 0), model.num_layers)
+    if split >= model.num_layers:
+        return
+    mult = args.split_lr_late_mult
+    if model.qo_bank.grad is not None:
+        model.qo_bank.grad[split:model.num_layers].mul_(mult)
+        model.qo_bank.grad[model.num_layers + split : 2 * model.num_layers].mul_(mult)
+    if model.kv_bank.grad is not None:
+        model.kv_bank.grad[split:model.num_layers].mul_(mult)
+        model.kv_bank.grad[model.num_layers + split : 2 * model.num_layers].mul_(mult)
+    if model.mlp_up_bank.grad is not None:
+        model.mlp_up_bank.grad[split:model.num_layers].mul_(mult)
+    if model.mlp_down_bank.grad is not None:
+        model.mlp_down_bank.grad[split:model.num_layers].mul_(mult)
 class Rotary(nn.Module):
     def __init__(self, dim: int, base: float = 10000.0, train_seq_len: int = 1024, rope_dims: int = 0):
         super().__init__()
@@ -1102,6 +1133,66 @@ def eval_val_sliding_ttt(
     stride: int, batch_seqs: int = 32, log0=print,
 ) -> tuple[float, float]:
     """Legal score-first TTT: each chunk is scored before any update sees it."""
+    def selected_ttt_params() -> tuple[list[tuple[str, nn.Parameter]], set[int]]:
+        num_blocks = len(base_model.blocks)
+        first_adapt_block = min(max(args.ttt_freeze_blocks, 0), num_blocks)
+        adapt_block_ids = set(range(first_adapt_block, num_blocks))
+        named: list[tuple[str, nn.Parameter]] = []
+        for name, p in base_model.named_parameters():
+            in_adapt_block = any(f"blocks.{bi}." in name for bi in adapt_block_ids)
+            in_final_norm = args.ttt_adapt_final_norm and name.startswith("final_norm.")
+            if in_adapt_block or in_final_norm:
+                p.requires_grad_(True)
+                named.append((name, p))
+            else:
+                p.requires_grad_(False)
+        return named, adapt_block_ids
+
+    def build_chunk_batches(chunk_start: int, chunk_end: int) -> list[tuple[int, int]]:
+        chunk_seqs = (chunk_end - chunk_start) // seq_len
+        my_seq_s = (chunk_seqs * rank) // world_size
+        my_seq_e = (chunk_seqs * (rank + 1)) // world_size
+        my_chunk_seqs = my_seq_e - my_seq_s
+        batches: list[tuple[int, int]] = []
+        for bs in range(0, my_chunk_seqs, args.ttt_batch_seqs):
+            be = min(bs + args.ttt_batch_seqs, my_chunk_seqs)
+            actual_bs = my_seq_s + bs
+            start_tok = chunk_start + actual_bs * seq_len
+            end_tok = chunk_start + (my_seq_s + be) * seq_len + 1
+            if end_tok <= val_tokens.numel():
+                batches.append((start_tok, end_tok))
+        return batches
+
+    def probe_chunk_loss(batches: list[tuple[int, int]]) -> float:
+        if not batches:
+            return 0.0
+        total_loss = 0.0
+        total_tokens_local = 0
+        base_model.eval()
+        with torch.inference_mode():
+            for start_tok, end_tok in batches[: max(args.ttt_probe_batches, 1)]:
+                local = val_tokens[start_tok:end_tok].to(device=device, dtype=torch.int64)
+                x = local[:-1].reshape(-1, seq_len)
+                y = local[1:].reshape(-1, seq_len)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    logits = base_model.forward_logits(x)
+                loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)).float(),
+                    y.reshape(-1),
+                    reduction="sum",
+                )
+                total_loss += float(loss.item())
+                total_tokens_local += int(y.numel())
+        base_model.train()
+        return total_loss / max(total_tokens_local, 1)
+
+    def stash_trainable_params(named_params: list[tuple[str, nn.Parameter]]) -> list[Tensor]:
+        return [p.detach().clone() for _, p in named_params]
+
+    def restore_trainable_params(named_params: list[tuple[str, nn.Parameter]], backup: list[Tensor]) -> None:
+        for (_, p), saved in zip(named_params, backup, strict=True):
+            p.data.copy_(saved)
+
     seq_len = args.train_seq_len
     total_tokens = val_tokens.numel() - 1
     ttt_chunk = args.ttt_chunk_tokens
@@ -1130,22 +1221,19 @@ def eval_val_sliding_ttt(
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
 
-    frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
-    for name, p in base_model.named_parameters():
-        freeze = any(f"blocks.{bi}." in name for bi in frozen_block_ids)
-        if freeze:
-            p.requires_grad_(False)
-        else:
-            p.requires_grad_(True)
-            ttt_params.append(p)
+    trainable_named_params, adapt_block_ids = selected_ttt_params()
+    ttt_params = [p for _, p in trainable_named_params]
 
     log0(
         f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
-        f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}"
+        f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)} "
+        f"adapt_blocks={sorted(adapt_block_ids)}"
     )
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    persistent_optimizer = None
+    if not args.ttt_reset_state_per_chunk and ttt_params:
+        persistent_optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+
     t0 = time.perf_counter()
     for ci in range(num_chunks):
         windows = chunk_windows[ci]
@@ -1193,22 +1281,22 @@ def eval_val_sliding_ttt(
         is_last_chunk = ci == num_chunks - 1
         if not is_last_chunk and args.ttt_epochs > 0:
             base_model.train()
-            chunk_seqs = (chunk_end - chunk_start) // seq_len
-            if chunk_seqs > 0:
+            chunk_batches = build_chunk_batches(chunk_start, chunk_end)
+            if chunk_batches:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg["lr"] = cos_lr
-                my_seq_s = (chunk_seqs * rank) // world_size
-                my_seq_e = (chunk_seqs * (rank + 1)) // world_size
-                my_chunk_seqs = my_seq_e - my_seq_s
+                optimizer = persistent_optimizer
+                if optimizer is None:
+                    optimizer = torch.optim.SGD(ttt_params, lr=cos_lr, momentum=args.ttt_momentum)
+                else:
+                    for pg in optimizer.param_groups:
+                        pg["lr"] = cos_lr
+                pre_probe_loss = probe_chunk_loss(chunk_batches)
+                backup = stash_trainable_params(trainable_named_params)
+                step_loss_sum = 0.0
+                step_count = 0
+                grad_norm_sum = 0.0
                 for _ in range(args.ttt_epochs):
-                    for bs in range(0, my_chunk_seqs, args.ttt_batch_seqs):
-                        be = min(bs + args.ttt_batch_seqs, my_chunk_seqs)
-                        actual_bs = my_seq_s + bs
-                        start_tok = chunk_start + actual_bs * seq_len
-                        end_tok = chunk_start + (my_seq_s + be) * seq_len + 1
-                        if end_tok > val_tokens.numel():
-                            continue
+                    for start_tok, end_tok in chunk_batches:
                         local = val_tokens[start_tok:end_tok].to(device=device, dtype=torch.int64)
                         x = local[:-1].reshape(-1, seq_len)
                         y = local[1:].reshape(-1, seq_len)
@@ -1216,18 +1304,42 @@ def eval_val_sliding_ttt(
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                             loss = base_model(x, y)
                         loss.backward()
+                        step_loss_sum += float(loss.item())
+                        step_count += 1
                         if world_size > 1:
                             for p in ttt_params:
                                 if p.grad is not None:
                                     dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
-                        torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
+                        grad_norm = torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
+                        grad_norm_sum += float(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
                         optimizer.step()
+                post_probe_loss = probe_chunk_loss(chunk_batches)
+                rollback = post_probe_loss > pre_probe_loss * (1.0 + args.ttt_rollback_rel_tol)
+                if rollback:
+                    restore_trainable_params(trainable_named_params, backup)
+                avg_step_loss = step_loss_sum / max(step_count, 1)
+                avg_grad_norm = grad_norm_sum / max(step_count, 1)
+            else:
+                pre_probe_loss = 0.0
+                post_probe_loss = 0.0
+                avg_step_loss = 0.0
+                avg_grad_norm = 0.0
+                rollback = False
 
         if rank == 0 and (ci % 10 == 0 or ci == num_chunks - 1):
             elapsed = time.perf_counter() - t0
             rl = loss_sum.item() / max(token_count.item(), 1)
             rbpb = rl / math.log(2.0) * (token_count.item() / max(byte_count.item(), 1)) if token_count.item() > 0 else 0.0
-            log0(f"  ttt_chunk [{ci + 1}/{num_chunks}] bpb={rbpb:.6f} time={elapsed:.1f}s")
+            log0(
+                f"  ttt_chunk [{ci + 1}/{num_chunks}] bpb={rbpb:.6f} time={elapsed:.1f}s "
+                f"lr={cos_lr if not is_last_chunk and args.ttt_epochs > 0 and chunk_batches else 0.0:.6f} "
+                f"steps={step_count if not is_last_chunk and args.ttt_epochs > 0 and chunk_batches else 0} "
+                f"train_loss={avg_step_loss if not is_last_chunk and args.ttt_epochs > 0 and chunk_batches else 0.0:.4f} "
+                f"probe_pre={pre_probe_loss if not is_last_chunk and args.ttt_epochs > 0 and chunk_batches else 0.0:.4f} "
+                f"probe_post={post_probe_loss if not is_last_chunk and args.ttt_epochs > 0 and chunk_batches else 0.0:.4f} "
+                f"grad_norm={avg_grad_norm if not is_last_chunk and args.ttt_epochs > 0 and chunk_batches else 0.0:.4f} "
+                f"rollback={int(rollback) if not is_last_chunk and args.ttt_epochs > 0 and chunk_batches else 0}"
+            )
 
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
@@ -1876,29 +1988,35 @@ def main() -> None:
         base_model.mlp_up_bank, base_model.mlp_down_bank,
     ]
     block_named_params = list(base_model.blocks.named_parameters())
-    scalar_params = [
-        p
-        for name, p in block_named_params
-        if p.ndim < 2 or any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)
-    ]
+    early_scalar_params = []
+    late_scalar_params = []
+    split_idx = min(max(args.split_lr_layer, 0), args.num_layers)
+    for name, p in block_named_params:
+        if p.ndim < 2 or any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS):
+            block_idx = block_index_from_name(name)
+            if args.split_lr_enabled and block_idx is not None and block_idx >= split_idx:
+                late_scalar_params.append(p)
+            else:
+                early_scalar_params.append(p)
+    shared_scalar_params = []
     if base_model.skip_weights.numel() > 0:
-        scalar_params.append(base_model.skip_weights)
-    scalar_params.append(base_model.smear.gate)
+        shared_scalar_params.append(base_model.skip_weights)
+    shared_scalar_params.append(base_model.smear.gate)
     if base_model.bigram is not None:
-        scalar_params.append(base_model.bigram.scale)
+        shared_scalar_params.append(base_model.bigram.scale)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     tok_params = [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}]
     if base_model.bigram is not None:
         tok_params.append({"params": [base_model.bigram.embed.weight], "lr": token_lr, "base_lr": token_lr})
         if base_model.bigram.proj is not None:
-            scalar_params.append(base_model.bigram.proj.weight)
+            shared_scalar_params.append(base_model.bigram.proj.weight)
     if base_model.ve_shared is not None:
         tok_params.append({"params": [base_model.ve_shared.embed.weight], "lr": token_lr, "base_lr": token_lr})
         if base_model.ve_shared.proj is not None:
-            scalar_params.append(base_model.ve_shared.proj.weight)
-        scalar_params.append(base_model.ve_shared.scale)
+            shared_scalar_params.append(base_model.ve_shared.proj.weight)
+        shared_scalar_params.append(base_model.ve_shared.scale)
         for s in base_model.ve_layer_scales:
-            scalar_params.append(s)
+            shared_scalar_params.append(s)
     optimizer_tok = torch.optim.AdamW(
         tok_params,
         betas=(args.beta1, args.beta2),
@@ -1915,8 +2033,16 @@ def main() -> None:
     )
     for group in optimizer_muon.param_groups:
         group["base_lr"] = args.matrix_lr
+    scalar_groups = []
+    if early_scalar_params:
+        scalar_groups.append({"params": early_scalar_params, "lr": args.scalar_lr, "base_lr": args.scalar_lr})
+    if late_scalar_params:
+        late_scalar_lr = args.scalar_lr * args.split_lr_late_mult if args.split_lr_enabled else args.scalar_lr
+        scalar_groups.append({"params": late_scalar_params, "lr": late_scalar_lr, "base_lr": late_scalar_lr})
+    if shared_scalar_params:
+        scalar_groups.append({"params": shared_scalar_params, "lr": args.scalar_lr, "base_lr": args.scalar_lr})
     optimizer_scalar = torch.optim.AdamW(
-        [{"params": scalar_params, "lr": args.scalar_lr, "base_lr": args.scalar_lr}],
+        scalar_groups,
         betas=(args.beta1, args.beta2),
         eps=args.adam_eps,
         weight_decay=args.adam_wd,
@@ -1926,7 +2052,8 @@ def main() -> None:
     replicated_params = list(optimizer_tok.param_groups[0]["params"])
     for pg in optimizer_tok.param_groups[1:]:
         replicated_params.extend(pg["params"])
-    replicated_params.extend(scalar_params)
+    for pg in optimizer_scalar.param_groups:
+        replicated_params.extend(pg["params"])
 
     optimizer_head = None
     if base_model.lm_head is not None:
@@ -1958,6 +2085,10 @@ def main() -> None:
         f"train_batch_tokens:{args.train_batch_tokens} train_seq_len:{args.train_seq_len} "
         f"iterations:{args.iterations} warmup_steps:{args.warmup_steps} "
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
+    )
+    log0(
+        f"split_lr:enabled={int(args.split_lr_enabled)} split_layer={args.split_lr_layer} "
+        f"late_mult={args.split_lr_late_mult:.3f}"
     )
     log0(f"seed:{args.seed}")
     train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
@@ -2057,6 +2188,7 @@ def main() -> None:
             train_loss += loss.detach()
             (loss * grad_scale).backward()
         train_loss /= grad_accum_steps
+        apply_split_lr_bank_grad_scale(base_model, args)
         frac = min(step / args.muon_momentum_warmup_steps, 1.0) if args.muon_momentum_warmup_steps > 0 else 1.0
         muon_momentum = (1 - frac) * args.muon_momentum_warmup_start + frac * args.muon_momentum
         for group in optimizer_muon.param_groups:

@@ -25,12 +25,15 @@ This directory is an implementation scaffold intended for cloud runs. The checke
 - BigramHash `3072 x 112`
 - AR self-generated Full GPTQ calibration
 - selective `±1` pruning to fit the artifact budget
+- split-LR defaults for later layers
 
 ### Added score-first TTT
 
 - `TTT_ENABLED=1` by default
 - score each chunk before any update touches it
-- freeze early blocks, adapt the rest
+- adapt only later full-parameter blocks plus `final_norm`
+- reset SGD state per chunk by default
+- probe and rollback chunks that get worse after adaptation
 - cosine chunk LR decay
 
 ### Added legal aggressive online n-gram overlay
@@ -102,9 +105,16 @@ done
 
 ## Recommended Knobs
 
-- `TTT_CHUNK_TOKENS=32768`
-- `TTT_EPOCHS=3`
-- `TTT_FREEZE_BLOCKS=2`
+- `TTT_CHUNK_TOKENS=131072`
+- `TTT_EPOCHS=1`
+- `TTT_FREEZE_BLOCKS=6`
+- `TTT_LR=0.0005`
+- `TTT_BATCH_SEQS=8`
+- `TTT_MOMENTUM=0.0`
+- `TTT_ROLLBACK_REL_TOL=0.01`
+- `SPLIT_LR_ENABLED=1`
+- `SPLIT_LR_LAYER=6`
+- `SPLIT_LR_LATE_MULT=1.2`
 - `TOKEN_ORDER=16`
 - `TOKEN_BOOST=2.625`
 - `WORD_ORDER=4`
