@@ -1,0 +1,20 @@
+{
+  "author": "x",
+  "github_id": "someone114514",
+  "name": "Modular SP4096 + Depth Recurrence + Parallel Residuals + Causal SLOT",
+  "date": "2026-04-06",
+  "track": "10min_16mb",
+  "val_bpb": 1.07660790,
+  "val_bpb_std": 0.00039902,
+  "seeds": [42, 314, 999],
+  "seed_results": {
+    "42": {"val_bpb": 1.07620919, "artifact_bytes": 15999461},
+    "314": {"val_bpb": 1.07660728, "artifact_bytes": 15997932},
+    "999": {"val_bpb": 1.07700722, "artifact_bytes": 15994941}
+  },
+  "comparison_baseline_pr": 1333,
+  "delta_vs_pr1333_bpb": 0.0,
+  "hardware": "8xH100 80GB SXM",
+  "pytorch_version": "2.9.1+cu128",
+  "technique_summary": "SP4096 + MLP 4x + WD 0.090 + Depth Recurrence + Parallel Residuals + MuonEq-R + QK-Gain 5.0 + Full GPTQ int6 + modular causal SLOT"
+}
