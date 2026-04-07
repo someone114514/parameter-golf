@@ -1,0 +1,20 @@
+{
+  "author": "aryanbhosale",
+  "github_id": "aryanbhosale",
+  "name": "Original #1333 Fork + Optional Legal N-Gram Eval",
+  "date": "2026-04-04",
+  "track": "10min_16mb",
+  "val_bpb": 1.07660790,
+  "val_bpb_std": 0.00039902,
+  "seeds": [42, 314, 999],
+  "seed_results": {
+    "42": {"val_bpb": 1.07620919, "artifact_bytes": 15999461},
+    "314": {"val_bpb": 1.07660728, "artifact_bytes": 15997932},
+    "999": {"val_bpb": 1.07700722, "artifact_bytes": 15994941}
+  },
+  "comparison_baseline_pr": 1019,
+  "delta_vs_pr1019_bpb": -0.03813,
+  "hardware": "8xH100 80GB SXM",
+  "pytorch_version": "2.9.1+cu128",
+  "technique_summary": "Original #1333 baseline retained; this fork adds an optional prefix-only legal n-gram evaluator via EVAL_MODE=ngram. Reported val_bpb remains the inherited #1333 baseline until the n-gram path is measured."
+}
