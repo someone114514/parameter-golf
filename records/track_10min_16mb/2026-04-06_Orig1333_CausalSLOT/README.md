@@ -1,73 +1,61 @@
-# Record Fork: Original `#1333` + Optional Legal N-Gram Eval
+# SP4096 + Depth Recurrence + Parallel Residuals + Legal N-Gram
 
-This folder starts from the original `#1333` code and keeps the original causal SLOT path intact. It also adds a separate `EVAL_MODE=ngram` final evaluator using a prefix-only legal n-gram overlay.
+**val_bpb = 1.08457715** | **seed 42** | **2-GPU 40-minute probe** | **15,967,527 bytes**
 
-The reported metrics below are the original `#1333` baseline numbers and do **not** claim any measured n-gram result yet.
+This folder starts from the original `#1333` SP4096 / recurrence / parallel-residual stack and evaluates a separate prefix-only legal n-gram path with `EVAL_MODE=ngram` and `SLOT_ENABLED=0`.
 
-## Original `#1333` 3-Seed Results (8xH100 80GB SXM, PyTorch 2.9.1+cu128)
+## Result
 
-| Seed | Sliding BPB | **Causal SLOT BPB** | SLOT gain | Artifact |
-|------|-------------|---------------------|-----------|----------|
-| 42   | 1.0893      | **1.0762**          | -0.0131   | 15,999,461 |
-| 314  | 1.0897      | **1.0766**          | -0.0131   | 15,997,932 |
-| 999  | 1.0897      | **1.0770**          | -0.0127   | 15,994,941 |
-| **Mean** | | **1.0766** | **-0.0130** | |
+| Metric | Value |
+|------|------:|
+| Pre-quantization post-EMA BPB | 1.09390451 |
+| Int6 roundtrip BPB | 1.10589735 |
+| Sliding-window BPB | 1.08719574 |
+| **Legal n-gram BPB** | **1.08457715** |
+| **N-gram gain vs sliding** | **-0.00283638** |
+| Total submission size | 15,967,527 |
 
-Merged SOTA (PR #1019): **1.1147 BPB**. Delta: **-0.0381 BPB**.
+## Main Idea
 
-## Current Modes
+The training stack stays with the original SP4096 recurrent base. The only new scoring path is a legal n-gram overlay:
 
-### Baseline `#1333`
-- `EVAL_MODE=slot SLOT_ENABLED=1`
-- Original causal SLOT evaluator from `#1333`
+1. Build prefix-only token / within-word / word-start experts from already-seen tokens.
+2. Run the frozen language model normally to obtain full-vocab logits.
+3. Apply a one-token bias from the chosen expert.
+4. Renormalize over the full vocabulary.
+5. Score the current token exactly once in a single left-to-right pass.
 
-### N-Gram Experiment
-- `EVAL_MODE=ngram ONLINE_NGRAM_ENABLED=1 SLOT_ENABLED=0`
-- Uses `online_best_agree_eval.py` and `online_ngram_state.c`
-- Prefix-only token / within-word / word-start hints
+## Legal N-Gram Details
+
+- Prefix-only state updates in `online_ngram_state.c`
+- Token n-gram expert
+- Within-word continuation expert
+- Word-start expert
 - One-token logit tilt plus full-vocab renormalization
-- No two-pass rescoring
-
-## Baseline `#1333` Techniques
-
-1. **4096-Vocab + MLP 4x + WD 0.090**
-2. **Depth Recurrence (layers 4,5)**
-3. **Parallel Residuals (from layer 7)**
-4. **MuonEq-R**
-5. **QK-Gain 5.0**
-6. **Full GPTQ int6 + Brotli + LZMA Compressed Wrapper**
-7. **Optional Causal SLOT** from original `#1333`
-8. **Optional Legal N-Gram** from this fork
-
-## Reproduction
-
-Original `#1333` SLOT:
-```bash
-pip install brotli
-MATCHED_FINEWEB_REPO_ID=kevclark/parameter-golf python3 data/cached_challenge_fineweb.py --variant sp4096 --skip-manifest
-SEED=42 RECUR_LAYERS=4,5 RECUR_START_STEP=3000 PARALLEL_START_LAYER=7 \
-SLOT_ENABLED=1 SLOT_LR=0.008 SLOT_STEPS=16 \
-torchrun --standalone --nproc_per_node=8 train_gpt.py
-```
-
-N-gram experiment:
-```bash
-pip install brotli
-MATCHED_FINEWEB_REPO_ID=kevclark/parameter-golf python3 data/cached_challenge_fineweb.py --variant sp4096 --skip-manifest
-SEED=42 RECUR_LAYERS=4,5 RECUR_START_STEP=3000 PARALLEL_START_LAYER=7 \
-EVAL_MODE=ngram ONLINE_NGRAM_ENABLED=1 SLOT_ENABLED=0 \
-WORD_ORDER=4 NGRAM_WORD_ENABLED=1 \
-torchrun --standalone --nproc_per_node=8 train_gpt.py
-```
-
-## Compliance Notes For The N-Gram Path
-
-- Strict prefix-only hint extraction
-- Full-vocab softmax retained after logit tilting
-- Single-pass left-to-right evaluation
 - No target-conditioned gating
 - No two-pass rescoring
+- No weight updates during evaluation
+
+## Run Used For The Result
+
+```bash
+MATCHED_FINEWEB_REPO_ID=kevclark/parameter-golf python3 data/cached_challenge_fineweb.py --variant sp4096
+
+SEED=42 \
+MAX_WALLCLOCK_SECONDS=2400 \
+EVAL_MODE=ngram \
+ONLINE_NGRAM_ENABLED=1 \
+SLOT_ENABLED=0 \
+torchrun --standalone --nproc_per_node=2 \
+records/track_10min_16mb/2026-04-06_Orig1333_CausalSLOT/train_gpt.py
+```
+
+## Notes
+
+- This result keeps the original `#1333` training base and swaps the final evaluator to legal n-gram.
+- The measured gain is real, but modest: roughly `0.0028 BPB`.
+- The current implementation is still CPU-heavy in the n-gram blending path.
 
 ## Credits
 
-PR #1218 @clarkkev, PR #1285 @dexhunter, PR #1204 @msisovic, PR #1289 @MatoTeziTanka, PR #1260 @dexhunter, PR #1019 @abaybektursun, PR #1287 @dentity007, PR #1217 @bigbag, PR #493 @parinzee, PR #1306 @resouer (causal SLOT), PR #1176 @bigbag (SLOT concept), PR #1145 @g-w1 (legal n-gram line)
+PR #1218 @clarkkev, PR #1285 @dexhunter, PR #1204 @msisovic, PR #1289 @MatoTeziTanka, PR #1260 @dexhunter, PR #1217 @bigbag, PR #1333 @aryanbhosale, PR #1145 @g-w1

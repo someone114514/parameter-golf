@@ -1,20 +1,18 @@
 {
-  "author": "aryanbhosale",
-  "github_id": "aryanbhosale",
-  "name": "Original #1333 Fork + Optional Legal N-Gram Eval",
-  "date": "2026-04-04",
+  "author": "someone114514",
+  "github_id": "someone114514",
+  "name": "SP4096 + Depth Recurrence + Parallel Residuals + Legal N-Gram",
+  "date": "2026-04-08",
   "track": "10min_16mb",
-  "val_bpb": 1.07660790,
-  "val_bpb_std": 0.00039902,
-  "seeds": [42, 314, 999],
+  "val_bpb": 1.08457715,
+  "val_bpb_std": 0.0,
+  "seeds": [42],
   "seed_results": {
-    "42": {"val_bpb": 1.07620919, "artifact_bytes": 15999461},
-    "314": {"val_bpb": 1.07660728, "artifact_bytes": 15997932},
-    "999": {"val_bpb": 1.07700722, "artifact_bytes": 15994941}
+    "42": {
+      "val_bpb": 1.08457715,
+      "artifact_bytes": 15967527
+    }
   },
-  "comparison_baseline_pr": 1019,
-  "delta_vs_pr1019_bpb": -0.03813,
-  "hardware": "8xH100 80GB SXM",
-  "pytorch_version": "2.9.1+cu128",
-  "technique_summary": "Original #1333 baseline retained; this fork adds an optional prefix-only legal n-gram evaluator via EVAL_MODE=ngram. Reported val_bpb remains the inherited #1333 baseline until the n-gram path is measured."
+  "hardware": "2 GPUs, 40-minute wallclock probe",
+  "technique_summary": "Original #1333 SP4096 recurrent base with final evaluator switched to a prefix-only legal n-gram overlay. Token, within-word, and word-start experts produce one-token hints that are applied via logit tilt with full-vocab renormalization."
 }
