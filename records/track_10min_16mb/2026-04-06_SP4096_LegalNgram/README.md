@@ -47,7 +47,7 @@ EVAL_MODE=ngram \
 ONLINE_NGRAM_ENABLED=1 \
 SLOT_ENABLED=0 \
 torchrun --standalone --nproc_per_node=2 \
-records/track_10min_16mb/2026-04-06_Orig1333_CausalSLOT/train_gpt.py
+records/track_10min_16mb/2026-04-06_SP4096_LegalNgram/train_gpt.py
 ```
 
 ## Notes
