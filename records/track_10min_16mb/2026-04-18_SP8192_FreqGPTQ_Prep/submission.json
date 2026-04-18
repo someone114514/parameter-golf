@@ -1,0 +1,37 @@
+{
+  "author": "bigbag",
+  "github_id": "bigbag",
+  "name": "SP8192 + 3-Layer Recurrence + Parallel Residuals + QK-Gain 5.25 + Legal Score-First TTT + FreqGPTQ Prep",
+  "date": "2026-04-18",
+  "track": "10min_16mb",
+  "val_bpb": 1.08100,
+  "val_bpb_std": 0.00020,
+  "seeds": [42, 314, 999],
+  "seed_results": {
+    "42": {"val_bpb": 1.08079, "artifact_bytes": 15991930},
+    "314": {"val_bpb": 1.08103, "artifact_bytes": 15992919},
+    "999": {"val_bpb": 1.08118, "artifact_bytes": 15993232}
+  },
+  "hardware": "8xH100 80GB SXM",
+  "pytorch_version": "2.9.1+cu128",
+  "technique_summary": "Prep fork of PR #1532 adding FreqGPTQ to GPTQ Hessian calibration only; metrics currently inherited from the base record for reference until rerun",
+  "note": "Prep fork only. val_bpb and seed_results are inherited from merged PR #1532 and do not yet reflect a rerun with FreqGPTQ enabled.",
+  "compliance": {
+    "train_under_600s": true,
+    "artifact_under_16mb": true,
+    "eval_under_600s": true,
+    "no_slot": true,
+    "no_pre_quant_ttt": true,
+    "no_etlb": true,
+    "no_ngram_cache": true,
+    "score_first_ttt": true,
+    "three_seeds": true
+  },
+  "attribution": {
+    "sp8192_gptq_sdclip": "@clarkkev (PR #1394)",
+    "depth_recurrence": "@dexhunter (PR #1331, #1437)",
+    "parallel_residuals": "@Robby955 (PR #1412), @msisovic (PR #1204)",
+    "legal_ttt_framework": "@abaybektursun (PR #549), @dexhunter (PR #1413)",
+    "hyperparameter_tuning": "@X-Abhishek-X (PR #1445)"
+  }
+}
