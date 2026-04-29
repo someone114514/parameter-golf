@@ -1,0 +1,12 @@
+{
+  "title": "Scout: SP8192 PerGroup AWQ-lite + AsymLogit",
+  "status": "experiment",
+  "track": "track_10min_16mb",
+  "claimed_val_bpb": null,
+  "base": [
+    "PR #1950 / PR #1934 per-group lrzip CaseOps line",
+    "PR #1945 AWQ-lite + asymmetric logit rescale implementation"
+  ],
+  "primary_run": "run_seed42_v21_strict.sh",
+  "notes": "No record claim. Use this folder to generate a strict seed-42 artifact before local post-training/quantization search."
+}

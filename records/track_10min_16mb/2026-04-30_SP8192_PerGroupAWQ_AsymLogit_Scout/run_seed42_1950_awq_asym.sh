@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+CASEOPS_ROOT="${CASEOPS_ROOT:-$REPO_ROOT/data/datasets/fineweb10B_sp8192_caseops}"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/runs/sp8192_1950_awq_asym_seed42}"
+mkdir -p "$OUT_DIR"
+cd "$SCRIPT_DIR"
+
+env \
+  RUN_ID=sp8192_1950_awq_asym_seed42 \
+  SEED=42 \
+  DATA_DIR="$CASEOPS_ROOT/datasets" \
+  DATA_PATH="$CASEOPS_ROOT/datasets/datasets/fineweb10B_sp8192_lossless_caps_caseops_v1_reserved" \
+  TOKENIZER_PATH="$CASEOPS_ROOT/datasets/tokenizers/fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model" \
+  ARTIFACT_DIR="$OUT_DIR" \
+  CASEOPS_ENABLED=1 \
+  VOCAB_SIZE=8192 \
+  ITERATIONS=20000 \
+  MAX_WALLCLOCK_SECONDS=600 \
+  WARMUP_STEPS=20 \
+  WARMDOWN_FRAC=0.75 \
+  BETA2=0.95 \
+  GRAD_CLIP_NORM=0.3 \
+  MIN_LR=0.1 \
+  MATRIX_LR=0.026 \
+  EMBED_WD=0.06 \
+  SPARSE_ATTN_GATE_ENABLED=1 \
+  SPARSE_ATTN_GATE_SCALE=1.0 \
+  SMEAR_GATE_ENABLED=1 \
+  GATE_WINDOW=12 \
+  GATED_ATTN_QUANT_GATE=1 \
+  FUSED_CE_ENABLED=1 \
+  EMBED_BITS=7 \
+  MATRIX_CLIP_SIGMAS=12.85 \
+  MLP_CLIP_SIGMAS=12.0 \
+  ATTN_CLIP_SIGMAS=12.0 \
+  EMBED_CLIP_SIGMAS=12.0 \
+  GPTQ_RESERVE_SECONDS="${GPTQ_RESERVE_SECONDS:-4.0}" \
+  GPTQ_CALIBRATION_BATCHES=16 \
+  COMPRESSOR=pergroup \
+  LQER_ENABLED=1 \
+  LQER_ASYM_ENABLED=1 \
+  LQER_RANK=4 \
+  LQER_FACTOR_BITS=4 \
+  LQER_ASYM_GROUP=64 \
+  LQER_TOP_K=3 \
+  AWQ_LITE_ENABLED=1 \
+  AWQ_LITE_BITS=8 \
+  AWQ_LITE_GROUP_TOP_K=1 \
+  AWQ_LITE_GROUP_SIZE=64 \
+  PHASED_TTT_ENABLED=1 \
+  PHASED_TTT_PREFIX_DOCS=2000 \
+  PHASED_TTT_NUM_PHASES=3 \
+  TTT_WARM_START_A=1 \
+  TTT_CHUNK_SIZE=48 \
+  TTT_LORA_RANK=96 \
+  TTT_WEIGHT_DECAY=1.0 \
+  TTT_BETA2=0.999 \
+  MUON_BACKEND_STEPS=5 \
+  NCCL_NET=Socket \
+  VAL_LOSS_EVERY=0 \
+  ASYM_LOGIT_RESCALE=1 \
+  torchrun --standalone --nproc_per_node="${NPROC_PER_NODE:-8}" train_gpt.py \
+  2>&1 | tee "$OUT_DIR/run.log"
