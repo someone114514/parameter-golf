@@ -333,6 +333,7 @@ class Hyperparameters:
     eval_subset_scale_prefix_docs = bool(int(os.environ.get("EVAL_SUBSET_SCALE_PREFIX_DOCS", "1")))
     ttt_compile_enabled = bool(int(os.environ.get("TTT_COMPILE_ENABLED", "1")))
     ttt_skip_warmup = bool(int(os.environ.get("TTT_SKIP_WARMUP", "0")))
+    ttt_eval_only_diag_quantized = bool(int(os.environ.get("TTT_EVAL_ONLY_DIAG_QUANTIZED", "0")))
     global_ttt_lr = float(os.environ.get("GLOBAL_TTT_LR", 0.001))
     global_ttt_momentum = float(os.environ.get("GLOBAL_TTT_MOMENTUM", 0.9))
     global_ttt_epochs = int(os.environ.get("GLOBAL_TTT_EPOCHS", 1))
@@ -3955,6 +3956,16 @@ def train_and_eval(h, device):
     eval_model = deserialize(h, device)
     if h.num_loops > 0:
         eval_model.looping_active = True
+    if ttt_eval_only and h.ttt_eval_only_diag_quantized:
+        timed_eval(
+            "diagnostic quantized eval-only",
+            eval_val,
+            h,
+            device,
+            val_data,
+            eval_model,
+            None,
+        )
     if not ttt_eval_only:
         compiled_model = torch.compile(eval_model, dynamic=False, fullgraph=True)
         compiled_forward_logits = torch.compile(

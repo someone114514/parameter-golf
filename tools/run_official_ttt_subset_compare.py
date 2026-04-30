@@ -41,6 +41,7 @@ def run_one(args, name, mask, q_lora, v_lora):
             "EVAL_SUBSET_SCALE_PREFIX_DOCS": "1" if args.scale_prefix_docs else "0",
             "TTT_COMPILE_ENABLED": "1" if args.compile else "0",
             "TTT_SKIP_WARMUP": "0" if args.compile else "1",
+            "TTT_EVAL_ONLY_DIAG_QUANTIZED": "1" if args.diag_quantized else "0",
             "COMPRESSOR": "pergroup",
         }
     )
@@ -108,6 +109,7 @@ def main():
     ap.add_argument("--chunk-size", type=int, default=48)
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--compile", action="store_true")
+    ap.add_argument("--diag-quantized", action="store_true")
     ap.add_argument("--no-scale-prefix-docs", dest="scale_prefix_docs", action="store_false")
     ap.set_defaults(scale_prefix_docs=True)
     args = ap.parse_args()
