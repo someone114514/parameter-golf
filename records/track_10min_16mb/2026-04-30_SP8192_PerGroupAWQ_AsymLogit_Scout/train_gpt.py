@@ -376,6 +376,7 @@ class Hyperparameters:
     awq_lite_bits = int(os.environ.get("AWQ_LITE_BITS", "8"))
     awq_lite_group_top_k = int(os.environ.get("AWQ_LITE_GROUP_TOP_K", "1"))
     awq_lite_group_size = int(os.environ.get("AWQ_LITE_GROUP_SIZE", "64"))
+    awq_lite_exclude_embeddings = bool(int(os.environ.get("AWQ_LITE_EXCLUDE_EMBEDDINGS", "1")))
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -2405,6 +2406,8 @@ def gptq_mixed_quantize(state_dict, hessians, act_stats, h):
         for (name, tensor) in state_dict.items():
             t = tensor.detach().cpu().contiguous()
             if t.is_floating_point() and t.numel() > 65536 and name in act_stats:
+                if h.awq_lite_exclude_embeddings and "tok_emb" in name:
+                    continue
                 bits = h.embed_bits if "tok_emb" in name else h.matrix_bits
                 if bits < h.awq_lite_bits:
                     for score, start, end in _awq_lite_group_candidates(

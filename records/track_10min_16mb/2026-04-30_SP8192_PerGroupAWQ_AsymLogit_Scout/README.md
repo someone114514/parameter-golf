@@ -25,6 +25,8 @@ run should be validated on seed 42 before spending more 8-GPU time.
   first script to run because it has direct PR #1945 evidence.
 - `run_seed42_1950_awq_asym.sh`: composition experiment: PR #1950-style clip,
   `EMBED_WD=0.06`, and `GPTQ_RESERVE_SECONDS=5.5`, plus AWQ-lite/asym-logit.
+- `run_seed42_1950_asym_safe.sh`: safer #1950-style run with AWQ disabled,
+  keeping the asymmetric LQER/logit pieces for an under-size check.
 - `download_caseops_data.py`: downloads the public CaseOps dataset from
   `romeerp/parameter-golf-caseops-v1`.
 
@@ -82,12 +84,17 @@ It defaults to `GPTQ_RESERVE_SECONDS=4.0` to avoid over-reserving training time;
 override it from the shell if the first run overshoots too much:
 
 ```bash
+bash records/track_10min_16mb/2026-04-30_SP8192_PerGroupAWQ_AsymLogit_Scout/run_seed42_1950_asym_safe.sh
 bash records/track_10min_16mb/2026-04-30_SP8192_PerGroupAWQ_AsymLogit_Scout/run_seed42_1950_awq_asym.sh
 # or:
 GPTQ_RESERVE_SECONDS=5.5 bash records/track_10min_16mb/2026-04-30_SP8192_PerGroupAWQ_AsymLogit_Scout/run_seed42_1950_awq_asym.sh
 ```
 
-Use it only after the V21 strict run is understood.
+Use the safe script first. A local inspection of an oversized seed-42
+`AWQ_LITE_ENABLED=1` run showed that AWQ selected only `tok_emb.weight`, pushed
+the total package to `16,048,707` bytes, and did not give a useful quantized
+score. `AWQ_LITE_EXCLUDE_EMBEDDINGS=1` is now the default guardrail; the safe
+script disables AWQ entirely.
 
 ## After a successful run
 
