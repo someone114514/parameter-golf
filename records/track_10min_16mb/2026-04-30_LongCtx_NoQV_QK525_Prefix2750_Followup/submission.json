@@ -1,0 +1,40 @@
+{
+  "author": "someone114514",
+  "github_id": "someone114514",
+  "name": "SP8192 + LongCtx QV-LoRA TTT QK5.25 candidate",
+  "date": "2026-04-30",
+  "track": "10min_16mb",
+  "status": "candidate_needs_full_eval",
+  "base_pr": 1953,
+  "base_val_bpb": 1.0585537,
+  "base_seed42_val_bpb": 1.0582472,
+  "candidate_change": {
+    "PHASED_TTT_PREFIX_DOCS": 2500,
+    "TTT_Q_LORA": 1,
+    "TTT_V_LORA": 1,
+    "base_TTT_MASK": "no_qv",
+    "base_TTT_Q_LORA": 0,
+    "base_TTT_V_LORA": 0,
+    "everything_else": "intended to match PR #1953"
+  },
+  "val_bpb": null,
+  "val_bpb_std": null,
+  "seeds": [],
+  "seed_results": {},
+  "local_probe": {
+    "artifact": "prefix2750_seed42 final_model.pt",
+    "starts": {
+      "500000": {"no_qv_ce": 2.72317738, "qv_lora_ce": 2.72143490, "delta_token_bpb": 0.002514},
+      "900000": {"no_qv_ce": 2.09834188, "qv_lora_ce": 2.09664042, "delta_token_bpb": 0.002455},
+      "1300000": {"no_qv_ce": 2.45098842, "qv_lora_ce": 2.44752116, "delta_token_bpb": 0.005002}
+    }
+  },
+  "compliance": {
+    "no_tokenizer_change": true,
+    "no_ppm": true,
+    "no_ngram": true,
+    "no_slot": true,
+    "no_logit_bias": true,
+    "score_before_update": "inherits PR #1953 phased TTT score-first implementation"
+  }
+}
