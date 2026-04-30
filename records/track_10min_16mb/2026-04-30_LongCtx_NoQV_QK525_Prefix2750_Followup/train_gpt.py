@@ -327,6 +327,12 @@ class Hyperparameters:
     gptq_reserve_seconds = float(os.environ.get("GPTQ_RESERVE_SECONDS", 4.0))
     phased_ttt_prefix_docs = int(os.environ.get("PHASED_TTT_PREFIX_DOCS", 2500))
     phased_ttt_num_phases = int(os.environ.get("PHASED_TTT_NUM_PHASES", 1))
+    eval_subset_start_doc = int(os.environ.get("EVAL_SUBSET_START_DOC", 0))
+    eval_subset_docs = int(os.environ.get("EVAL_SUBSET_DOCS", 0))
+    eval_subset_tokens = int(os.environ.get("EVAL_SUBSET_TOKENS", 0))
+    eval_subset_scale_prefix_docs = bool(int(os.environ.get("EVAL_SUBSET_SCALE_PREFIX_DOCS", "1")))
+    ttt_compile_enabled = bool(int(os.environ.get("TTT_COMPILE_ENABLED", "1")))
+    ttt_skip_warmup = bool(int(os.environ.get("TTT_SKIP_WARMUP", "0")))
     global_ttt_lr = float(os.environ.get("GLOBAL_TTT_LR", 0.001))
     global_ttt_momentum = float(os.environ.get("GLOBAL_TTT_MOMENTUM", 0.9))
     global_ttt_epochs = int(os.environ.get("GLOBAL_TTT_EPOCHS", 1))
@@ -3102,6 +3108,49 @@ def _find_docs(all_tokens):
     return docs
 
 
+def _maybe_apply_eval_subset(h, val_data):
+    if h.eval_subset_docs <= 0 and h.eval_subset_tokens <= 0:
+        return
+    global BOS_ID
+    if BOS_ID is None:
+        BOS_ID = 1
+    docs = _find_docs(val_data.val_tokens)
+    total_docs = len(docs)
+    start_doc = max(0, min(int(h.eval_subset_start_doc), max(total_docs - 1, 0)))
+    if h.eval_subset_docs > 0:
+        end_doc = min(total_docs, start_doc + int(h.eval_subset_docs))
+    else:
+        target_tokens = max(1, int(h.eval_subset_tokens))
+        end_doc = start_doc
+        while end_doc < total_docs:
+            raw_start = docs[start_doc][0]
+            raw_end = docs[end_doc + 1][0] if end_doc + 1 < total_docs else val_data.val_tokens.numel()
+            if raw_end - raw_start - 1 >= target_tokens:
+                end_doc += 1
+                break
+            end_doc += 1
+        end_doc = max(start_doc + 1, min(end_doc, total_docs))
+    raw_start = docs[start_doc][0]
+    raw_end = docs[end_doc][0] if end_doc < total_docs else val_data.val_tokens.numel()
+    selected_docs = end_doc - start_doc
+    old_tokens = val_data.val_tokens.numel() - 1
+    val_data.val_tokens = val_data.val_tokens[raw_start:raw_end].contiguous()
+    if val_data.val_bytes is not None:
+        val_data.val_bytes = val_data.val_bytes[raw_start:raw_end].contiguous()
+    new_tokens = val_data.val_tokens.numel() - 1
+    if h.eval_subset_scale_prefix_docs:
+        old_prefix = int(h.phased_ttt_prefix_docs)
+        scaled = int(round(old_prefix * (selected_docs / max(total_docs, 1))))
+        h.phased_ttt_prefix_docs = max(1, min(selected_docs, scaled))
+        log(
+            f"eval_subset: scaled PHASED_TTT_PREFIX_DOCS {old_prefix}->{h.phased_ttt_prefix_docs}"
+        )
+    log(
+        f"eval_subset: docs {start_doc}:{end_doc}/{total_docs} raw_tokens "
+        f"{raw_start}:{raw_end} val_tokens {old_tokens}->{new_tokens}"
+    )
+
+
 def _build_ttt_global_batches(doc_entries, h, ascending=False):
     batch_size = h.ttt_batch_size
     global_doc_entries = sorted(doc_entries, key=lambda x: x[1][1])
@@ -3856,6 +3905,7 @@ def train_and_eval(h, device):
     if h.artifact_dir and h.is_main_process:
         os.makedirs(h.artifact_dir, exist_ok=True)
     val_data = ValidationData(h, device)
+    _maybe_apply_eval_subset(h, val_data)
     log(
         f"train_shards: {len(list(Path(h.datasets_dir).resolve().glob('fineweb_train_*.bin')))}"
     )
@@ -3930,6 +3980,7 @@ def train_and_eval(h, device):
         ttt_model = deserialize(h, device)
         if h.num_loops > 0:
             ttt_model.looping_active = True
+        ttt_model.eval()
         for p in ttt_model.parameters():
             p.requires_grad_(False)
 
@@ -3951,39 +4002,46 @@ def train_and_eval(h, device):
 
         def _fwd_ttt(input_ids, target_ids, lora):
             nonlocal _fwd_ttt_compiled_inner
+            if not h.ttt_compile_enabled:
+                return _fwd_ttt_inner(input_ids, target_ids, lora)
             if _fwd_ttt_compiled_inner is None:
                 _fwd_ttt_compiled_inner = torch.compile(_fwd_ttt_inner, dynamic=True)
             return _fwd_ttt_compiled_inner(input_ids, target_ids, lora=lora)
 
         fwd_ttt_compiled = _fwd_ttt
+        if not h.ttt_compile_enabled:
+            log("ttt_lora:torch.compile disabled by TTT_COMPILE_ENABLED=0")
         log(f"ttt_lora:warming up compile (random tokens, no val data)")
         if BOS_ID is None:
             BOS_ID = 1
         t_warmup = time.perf_counter()
-        warmup_bszes = [h.ttt_batch_size]
-        for bsz in warmup_bszes:
-            wl = BatchedTTTLoRA(
-                bsz, ttt_model, h.ttt_lora_rank,
-                q_lora=h.ttt_q_lora, k_lora=h.ttt_k_lora, v_lora=h.ttt_v_lora,
-                mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
-            ).to(device)
-            wo = torch.optim.AdamW(
-                wl.parameters(),
-                lr=h.ttt_lora_lr * h.ttt_local_lr_mult,
-                betas=(h.ttt_beta1, h.ttt_beta2),
-                eps=1e-10,
-                weight_decay=h.ttt_weight_decay,
-                fused=True,
-            )
-            for ctx_len in (h.ttt_chunk_size, h.ttt_eval_seq_len):
-                xw = torch.randint(0, h.vocab_size, (bsz, ctx_len), device=device, dtype=torch.int64)
-                yw = torch.randint(0, h.vocab_size, (bsz, ctx_len), device=device, dtype=torch.int64)
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    ptl = fwd_ttt_compiled(xw, yw, lora=wl)
-                ptl[:, : min(h.ttt_chunk_size, ctx_len)].mean(dim=-1).sum().backward()
-                wo.step()
-                wo.zero_grad(set_to_none=True)
-            del wl, wo
+        if h.ttt_skip_warmup:
+            log("ttt_lora:compile warmup skipped by TTT_SKIP_WARMUP=1")
+        else:
+            warmup_bszes = [h.ttt_batch_size]
+            for bsz in warmup_bszes:
+                wl = BatchedTTTLoRA(
+                    bsz, ttt_model, h.ttt_lora_rank,
+                    q_lora=h.ttt_q_lora, k_lora=h.ttt_k_lora, v_lora=h.ttt_v_lora,
+                    mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
+                ).to(device)
+                wo = torch.optim.AdamW(
+                    wl.parameters(),
+                    lr=h.ttt_lora_lr * h.ttt_local_lr_mult,
+                    betas=(h.ttt_beta1, h.ttt_beta2),
+                    eps=1e-10,
+                    weight_decay=h.ttt_weight_decay,
+                    fused=True,
+                )
+                for ctx_len in (h.ttt_chunk_size, h.ttt_eval_seq_len):
+                    xw = torch.randint(0, h.vocab_size, (bsz, ctx_len), device=device, dtype=torch.int64)
+                    yw = torch.randint(0, h.vocab_size, (bsz, ctx_len), device=device, dtype=torch.int64)
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        ptl = fwd_ttt_compiled(xw, yw, lora=wl)
+                    ptl[:, : min(h.ttt_chunk_size, ctx_len)].mean(dim=-1).sum().backward()
+                    wo.step()
+                    wo.zero_grad(set_to_none=True)
+                del wl, wo
         torch.cuda.empty_cache()
         compile_elapsed = time.perf_counter() - t_warmup
         log(f"ttt_lora:compile warmup done ({compile_elapsed:.1f}s)")
