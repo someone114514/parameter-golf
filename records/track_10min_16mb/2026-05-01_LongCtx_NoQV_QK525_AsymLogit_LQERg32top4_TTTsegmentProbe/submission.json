@@ -1,0 +1,17 @@
+{
+  "status": "eval_only_probe",
+  "base_pr": 2060,
+  "base_record_dir": "2026-05-01_LongCtx_NoQV_QK525_AsymLogit_LQERg32top4_TTTlocal080_1.0579",
+  "purpose": "Measure no-TTT and tail-gated TTT segment BPB on the exact PR2060 validation document queue.",
+  "changes": [
+    "TTT_SEGMENT_LOG all-rank bucket BPB logging",
+    "TTT_TAIL_POLICY fixed late local-update gates",
+    "run_segment_probe_suite.py eval-only runner"
+  ],
+  "queue_invariance": [
+    "ValidationData",
+    "_find_docs",
+    "_select_ttt_doc_entries",
+    "_build_ttt_global_batches(..., ascending=False)"
+  ]
+}
