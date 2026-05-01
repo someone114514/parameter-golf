@@ -48,6 +48,85 @@ BASELINE_ENV = {
 }
 
 
+BASE_CANDIDATE = {
+    "TTT_MASK": "no_qv",
+    "TTT_Q_LORA": "0",
+    "TTT_V_LORA": "0",
+    "TTT_K_LORA": "1",
+    "TTT_MLP_LORA": "1",
+    "TTT_O_LORA": "1",
+    "TTT_LM_HEAD_LORA": "1",
+    "TTT_UPDATE_LOSS_MODE": "ce",
+    "TTT_UPDATE_LOSS_CAP": "0",
+    "TTT_LORA_A_LR_MULT": "1.0",
+    "TTT_LORA_B_LR_MULT": "1.0",
+    "TTT_LORA_A_WD_MULT": "1.0",
+    "TTT_LORA_B_WD_MULT": "1.0",
+}
+
+
+CANDIDATES = {
+    "qv_on": {
+        "TTT_MASK": "all",
+        "TTT_Q_LORA": "1",
+        "TTT_V_LORA": "1",
+    },
+    "robust_hard5": {
+        "TTT_UPDATE_LOSS_MODE": "hard_cap",
+        "TTT_UPDATE_LOSS_CAP": "5.0",
+    },
+    "robust_hard6": {
+        "TTT_UPDATE_LOSS_MODE": "hard_cap",
+        "TTT_UPDATE_LOSS_CAP": "6.0",
+    },
+    "robust_soft5": {
+        "TTT_UPDATE_LOSS_MODE": "soft_cap",
+        "TTT_UPDATE_LOSS_CAP": "5.0",
+        "TTT_UPDATE_LOSS_MIN_WEIGHT": "0.25",
+    },
+    "robust_soft6": {
+        "TTT_UPDATE_LOSS_MODE": "soft_cap",
+        "TTT_UPDATE_LOSS_CAP": "6.0",
+        "TTT_UPDATE_LOSS_MIN_WEIGHT": "0.25",
+    },
+    "no_lm_head": {
+        "TTT_LM_HEAD_LORA": "0",
+    },
+    "no_k": {
+        "TTT_K_LORA": "0",
+    },
+    "no_o": {
+        "TTT_O_LORA": "0",
+    },
+    "mlp_only": {
+        "TTT_K_LORA": "0",
+        "TTT_O_LORA": "0",
+        "TTT_LM_HEAD_LORA": "0",
+    },
+    "ko_only": {
+        "TTT_MLP_LORA": "0",
+        "TTT_LM_HEAD_LORA": "0",
+    },
+    "mlp_lm_head": {
+        "TTT_K_LORA": "0",
+        "TTT_O_LORA": "0",
+        "TTT_LM_HEAD_LORA": "1",
+    },
+    "a_half": {
+        "TTT_LORA_A_LR_MULT": "0.5",
+    },
+    "a_quarter": {
+        "TTT_LORA_A_LR_MULT": "0.25",
+    },
+    "a_frozen": {
+        "TTT_LORA_A_LR_MULT": "0.0",
+    },
+    "a_wd2": {
+        "TTT_LORA_A_WD_MULT": "2.0",
+    },
+}
+
+
 def infer_caseops_paths(data_dir):
     roots = [
         data_dir,
@@ -68,13 +147,15 @@ def infer_caseops_paths(data_dir):
     return tokenizer, dataset
 
 
-def run_one(args, name, mask, q_lora, v_lora):
+def run_one(args, name, overrides):
     env = os.environ.copy()
     lrzip_bin = Path.home() / ".local" / "lrzip" / "usr" / "bin"
     if lrzip_bin.exists():
         env["PATH"] = f"{lrzip_bin}:{env.get('PATH', '')}"
     tokenizer_path, data_path = infer_caseops_paths(args.data_dir)
     env.update(BASELINE_ENV)
+    candidate_env = dict(BASE_CANDIDATE)
+    candidate_env.update(overrides)
     env.update(
         {
             "PYTHONUNBUFFERED": "1",
@@ -85,12 +166,6 @@ def run_one(args, name, mask, q_lora, v_lora):
             "TOKENIZER_PATH": str(tokenizer_path),
             "TTT_EVAL_ONLY": "1",
             "TTT_ENABLED": "1",
-            "TTT_MASK": mask,
-            "TTT_Q_LORA": str(q_lora),
-            "TTT_V_LORA": str(v_lora),
-            "TTT_K_LORA": "1",
-            "TTT_MLP_LORA": "1",
-            "TTT_O_LORA": "1",
             "TTT_LORA_RANK": str(args.rank),
             "TTT_LORA_ALPHA": str(args.alpha),
             "TTT_LORA_LR": str(args.lr),
@@ -110,6 +185,7 @@ def run_one(args, name, mask, q_lora, v_lora):
             "VAL_BATCH_TOKENS": str(args.val_batch_tokens),
         }
     )
+    env.update(candidate_env)
     if args.subset_docs:
         env["EVAL_SUBSET_DOCS"] = str(args.subset_docs)
         env.pop("EVAL_SUBSET_TOKENS", None)
@@ -121,7 +197,8 @@ def run_one(args, name, mask, q_lora, v_lora):
         cmd = [sys.executable, str(args.flash_stub), str(args.submission)]
     else:
         cmd = [sys.executable, str(args.submission)]
-    print(f"\n===== official_subset {name} mask={mask} q={q_lora} v={v_lora} =====", flush=True)
+    shown = " ".join(f"{k}={v}" for k, v in sorted(candidate_env.items()) if v != BASE_CANDIDATE.get(k))
+    print(f"\n===== official_subset {name} {shown} =====", flush=True)
     proc = subprocess.Popen(
         cmd,
         env=env,
@@ -179,6 +256,11 @@ def main():
     ap.add_argument("--diag-quantized", action="store_true")
     ap.add_argument("--diag-only", action="store_true")
     ap.add_argument("--val-batch-tokens", type=int, default=65536)
+    ap.add_argument(
+        "--candidates",
+        default="qv_on",
+        help="Comma-separated candidate names. Use list to print available candidates.",
+    )
     ap.add_argument("--no-scale-prefix-docs", dest="scale_prefix_docs", action="store_false")
     ap.set_defaults(scale_prefix_docs=True)
     args = ap.parse_args()
@@ -187,6 +269,9 @@ def main():
     args.artifact_dir = Path(args.artifact_dir).resolve()
     args.data_dir = Path(args.data_dir).resolve()
     args.flash_stub = Path(args.flash_stub).resolve() if args.flash_stub else None
+    if args.candidates.strip() == "list":
+        print("\n".join(sorted(CANDIDATES)))
+        return
     required = [args.submission, args.artifact_dir / "final_model.int6.ptz", args.data_dir]
     if args.flash_stub is not None:
         required.append(args.flash_stub)
@@ -194,18 +279,26 @@ def main():
         if not path.exists():
             raise SystemExit(f"missing required path: {path}")
 
-    base_line = run_one(args, "base_no_qv", "no_qv", 0, 0)
+    requested = [c.strip() for c in args.candidates.split(",") if c.strip()]
+    unknown = [c for c in requested if c not in CANDIDATES]
+    if unknown:
+        raise SystemExit(f"unknown candidates: {', '.join(unknown)}")
+
+    base_line = run_one(args, "base_no_qv", {})
     if args.diag_only:
         print("\n===== official_subset diagnostic summary =====")
         print(base_line)
         return
-    qv_line = run_one(args, "qv_on", "all", 1, 1)
     base_bpb = parse_bpb(base_line)
-    qv_bpb = parse_bpb(qv_line)
+    results = []
+    for cand in requested:
+        line = run_one(args, cand, CANDIDATES[cand])
+        results.append((cand, line, parse_bpb(line)))
     print("\n===== official_subset summary =====")
     print(base_line)
-    print(qv_line)
-    print(f"delta_bpb(base-qv): {base_bpb - qv_bpb:+.8f}")
+    for cand, line, bpb in results:
+        print(line)
+        print(f"delta_bpb(base-{cand}): {base_bpb - bpb:+.8f}")
 
 
 if __name__ == "__main__":

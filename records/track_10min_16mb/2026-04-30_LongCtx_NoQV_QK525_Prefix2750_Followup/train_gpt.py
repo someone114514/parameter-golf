@@ -319,8 +319,16 @@ class Hyperparameters:
     ttt_v_lora = bool(int(os.environ.get("TTT_V_LORA", _ttt_v_default)))
     ttt_mlp_lora = bool(int(os.environ.get("TTT_MLP_LORA", "1")))
     ttt_o_lora = bool(int(os.environ.get("TTT_O_LORA", "1")))
+    ttt_lm_head_lora = bool(int(os.environ.get("TTT_LM_HEAD_LORA", "1")))
     ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "adam")
     ttt_eval_batches = os.environ.get("TTT_EVAL_BATCHES", "")
+    ttt_update_loss_mode = os.environ.get("TTT_UPDATE_LOSS_MODE", "ce").strip().lower()
+    ttt_update_loss_cap = float(os.environ.get("TTT_UPDATE_LOSS_CAP", 0.0))
+    ttt_update_loss_min_weight = float(os.environ.get("TTT_UPDATE_LOSS_MIN_WEIGHT", 0.25))
+    ttt_lora_a_lr_mult = float(os.environ.get("TTT_LORA_A_LR_MULT", 1.0))
+    ttt_lora_b_lr_mult = float(os.environ.get("TTT_LORA_B_LR_MULT", 1.0))
+    ttt_lora_a_wd_mult = float(os.environ.get("TTT_LORA_A_WD_MULT", 1.0))
+    ttt_lora_b_wd_mult = float(os.environ.get("TTT_LORA_B_WD_MULT", 1.0))
     val_doc_fraction = float(os.environ.get("VAL_DOC_FRACTION", 1.0))
     compressor = os.environ.get("COMPRESSOR", "brotli")
     gptq_calibration_batches = int(os.environ.get("GPTQ_CALIBRATION_BATCHES", 16))
@@ -1553,7 +1561,8 @@ class GPT(nn.Module):
             logits = F.linear(x, self.tok_emb.weight)
         else:
             logits = self.lm_head(x)
-        logits = logits + lora.lm_head_lora(x)
+        if lora.lm_head_lora is not None:
+            logits = logits + lora.lm_head_lora(x)
         # V19: same asymmetric softcap on the TTT eval path.
         if self.asym_logit_enabled:
             logits = self._apply_asym_softcap(logits)
@@ -1728,6 +1737,7 @@ class BatchedTTTLoRA(nn.Module):
     def __init__(
         self, bsz, model, rank,
         q_lora=True, k_lora=True, v_lora=True, mlp_lora=True, o_lora=True,
+        lm_head_lora=True,
     ):
         super().__init__()
         self.bsz = bsz
@@ -1741,7 +1751,11 @@ class BatchedTTTLoRA(nn.Module):
             dim // model.blocks[0].attn.num_heads
         )
         embed_dim = model.tok_emb.embedding_dim
-        self.lm_head_lora = BatchedLinearLoRA(bsz, embed_dim, vocab, rank)
+        self.lm_head_lora = (
+            BatchedLinearLoRA(bsz, embed_dim, vocab, rank)
+            if lm_head_lora
+            else None
+        )
         self.q_loras = (
             nn.ModuleList(
                 [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
@@ -1780,7 +1794,8 @@ class BatchedTTTLoRA(nn.Module):
 
     def reset(self):
         with torch.no_grad():
-            self.lm_head_lora.reset()
+            if self.lm_head_lora is not None:
+                self.lm_head_lora.reset()
             for loras in [self.q_loras, self.v_loras, self.k_loras,
                           self.mlp_loras, self.o_loras]:
                 if loras is not None:
@@ -3234,6 +3249,22 @@ def _loss_bpb_from_sums(loss_sum, token_count, byte_sum):
     return val_loss, val_bpb
 
 
+def _ttt_update_loss_transform(h, losses):
+    mode = h.ttt_update_loss_mode
+    if mode in ("", "ce", "none"):
+        return losses
+    cap = float(h.ttt_update_loss_cap)
+    if cap <= 0.0:
+        return losses
+    if mode in ("hard_cap", "clamp"):
+        return torch.minimum(losses, losses.new_tensor(cap))
+    if mode in ("soft_cap", "downweight"):
+        min_w = float(h.ttt_update_loss_min_weight)
+        weights = (cap / losses.detach().clamp_min(1e-6)).clamp(min_w, 1.0)
+        return losses * weights
+    raise ValueError(f"unknown TTT_UPDATE_LOSS_MODE={mode!r}")
+
+
 def _add_to_counter(path, delta):
     try:
         with open(path, "r+b") as f:
@@ -3416,19 +3447,39 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
         h.ttt_batch_size, base_model, h.ttt_lora_rank,
         q_lora=h.ttt_q_lora, k_lora=h.ttt_k_lora, v_lora=h.ttt_v_lora,
         mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
+        lm_head_lora=h.ttt_lm_head_lora,
     ).to(device)
 
     def _build_opt(lora):
         local_lr = h.ttt_lora_lr * h.ttt_local_lr_mult
+        groups = []
+        for name, p in lora.named_parameters():
+            if not p.requires_grad:
+                continue
+            if name.endswith(".A"):
+                lr_mult = h.ttt_lora_a_lr_mult
+                wd_mult = h.ttt_lora_a_wd_mult
+            elif name.endswith(".B"):
+                lr_mult = h.ttt_lora_b_lr_mult
+                wd_mult = h.ttt_lora_b_wd_mult
+            else:
+                lr_mult = 1.0
+                wd_mult = 1.0
+            groups.append(
+                {
+                    "params": [p],
+                    "lr": local_lr * lr_mult,
+                    "weight_decay": h.ttt_weight_decay * wd_mult,
+                }
+            )
         if h.ttt_optimizer == "sgd":
             return torch.optim.SGD(
-                lora.parameters(), lr=local_lr,
-                momentum=h.ttt_beta1, weight_decay=h.ttt_weight_decay,
+                groups, lr=local_lr, momentum=h.ttt_beta1,
             )
         return torch.optim.AdamW(
-            lora.parameters(), lr=local_lr,
+            groups, lr=local_lr,
             betas=(h.ttt_beta1, h.ttt_beta2),
-            eps=1e-10, weight_decay=h.ttt_weight_decay, fused=True,
+            eps=1e-10, fused=True,
         )
 
     reusable_opt = _build_opt(reusable_lora)
@@ -3460,6 +3511,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
                 bsz, base_model, h.ttt_lora_rank,
                 q_lora=h.ttt_q_lora, k_lora=h.ttt_k_lora, v_lora=h.ttt_v_lora,
                 mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
+                lm_head_lora=h.ttt_lm_head_lora,
             ).to(device)
             cur_opt = _build_opt(cur_lora)
         pred_lens = [doc_len - 1 for _, doc_len in batch]
@@ -3544,9 +3596,11 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
                     if gi > 0:
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                             per_tok_loss = forward_ttt_train(x, y, lora=cur_lora)
-                    per_doc = per_tok_loss[
-                        :, chunk_offset : chunk_offset + chunk_size
-                    ].mean(dim=-1)
+                    update_loss = _ttt_update_loss_transform(
+                        h,
+                        per_tok_loss[:, chunk_offset : chunk_offset + chunk_size],
+                    )
+                    per_doc = update_loss.mean(dim=-1)
                     cur_opt.zero_grad(set_to_none=True)
                     (per_doc * activate_chunk_mask).sum().backward()
                     cur_opt.step()
@@ -3632,6 +3686,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
                     h.ttt_batch_size, base_model, h.ttt_lora_rank,
                     q_lora=h.ttt_q_lora, k_lora=h.ttt_k_lora, v_lora=h.ttt_v_lora,
                     mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
+                    lm_head_lora=h.ttt_lm_head_lora,
                 ).to(device)
                 reusable_opt = _build_opt(reusable_lora)
                 current_phase += 1
@@ -4039,6 +4094,7 @@ def train_and_eval(h, device):
                     bsz, ttt_model, h.ttt_lora_rank,
                     q_lora=h.ttt_q_lora, k_lora=h.ttt_k_lora, v_lora=h.ttt_v_lora,
                     mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
+                    lm_head_lora=h.ttt_lm_head_lora,
                 ).to(device)
                 wo = torch.optim.AdamW(
                     wl.parameters(),
