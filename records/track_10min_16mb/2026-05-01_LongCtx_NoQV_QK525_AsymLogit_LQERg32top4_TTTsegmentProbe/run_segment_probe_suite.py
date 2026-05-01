@@ -50,10 +50,14 @@ MODES = {
 
 
 def prepare_artifact_dir(model_path: Path, artifact_dir: Path) -> Path:
+    if not model_path.exists():
+        raise FileNotFoundError(f"model file not found: {model_path}")
     artifact_dir.mkdir(parents=True, exist_ok=True)
     target = artifact_dir / "final_model.int6.ptz"
     if target.exists():
         return artifact_dir
+    if target.is_symlink():
+        target.unlink()
     try:
         target.symlink_to(model_path.resolve())
     except OSError:
@@ -82,6 +86,8 @@ def run_one(args, mode: str) -> int:
             "ARTIFACT_DIR": str(artifact_dir),
             "TTT_EVAL_ONLY": "1",
             "TTT_SEGMENT_LOG": "1",
+            "TTT_COMPILE_ENABLED": str(args.compile),
+            "TTT_SKIP_WARMUP": str(args.skip_warmup),
             "CASEOPS_ROOT": str(caseops_root),
             "CASEOPS_ENABLED": "1",
             "DATA_DIR": str(data_dir),
@@ -95,6 +101,8 @@ def run_one(args, mode: str) -> int:
         }
     )
     env.update(MODES[mode])
+    if args.batch_range:
+        env["TTT_BATCH_RANGE"] = args.batch_range
     log_path = HERE / f"{env['RUN_ID']}.outer.log"
     cmd = [
         "torchrun",
@@ -128,6 +136,9 @@ def main() -> None:
     parser.add_argument("--gpus", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--run-id-prefix", default="ttt_segment_probe")
+    parser.add_argument("--batch-range", default="")
+    parser.add_argument("--compile", default="0")
+    parser.add_argument("--skip-warmup", default="1")
     parser.add_argument(
         "--modes",
         default="no_ttt,base2060,p3500_lr0008,p3500_batch300_150,p3500_batch300_off,p3500_doc512_256",

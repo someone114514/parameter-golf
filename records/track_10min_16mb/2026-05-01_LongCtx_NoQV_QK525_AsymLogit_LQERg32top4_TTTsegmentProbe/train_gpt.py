@@ -321,6 +321,9 @@ class Hyperparameters:
     ttt_o_lora = bool(int(os.environ.get("TTT_O_LORA", "1")))
     ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "adam")
     ttt_eval_batches = os.environ.get("TTT_EVAL_BATCHES", "")
+    ttt_batch_range = os.environ.get("TTT_BATCH_RANGE", "").strip()
+    ttt_compile_enabled = bool(int(os.environ.get("TTT_COMPILE_ENABLED", "1")))
+    ttt_skip_warmup = bool(int(os.environ.get("TTT_SKIP_WARMUP", "0")))
     ttt_segment_log = bool(int(os.environ.get("TTT_SEGMENT_LOG", "0")))
     ttt_tail_policy = os.environ.get("TTT_TAIL_POLICY", "none").strip().lower()
     val_doc_fraction = float(os.environ.get("VAL_DOC_FRACTION", 1.0))
@@ -3117,6 +3120,29 @@ def _build_ttt_global_batches(doc_entries, h, ascending=False):
     return indexed
 
 
+def _parse_ttt_batch_range(text):
+    if not text:
+        return None
+    ranges = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            ranges.append((int(lo), int(hi)))
+        else:
+            v = int(part)
+            ranges.append((v, v))
+    return ranges
+
+
+def _ttt_batch_in_range(batch_num, ranges):
+    if ranges is None:
+        return True
+    return any(lo <= batch_num <= hi for lo, hi in ranges)
+
+
 TTT_SEGMENT_BUCKETS = (
     (700, 10**9, "b700p"),
     (600, 699, "b600_699"),
@@ -3383,12 +3409,6 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
         phase_boundaries.append(boundary)
     current_phase = 0
     current_phase_boundary = phase_boundaries[0]
-    log(
-        "ttt_phased:"
-        f" total_docs:{len(doc_entries)} prefix_docs:{prefix_doc_limit} "
-        f"suffix_docs:{len(doc_entries) - prefix_doc_limit}"
-        f" num_phases:{num_phases} boundaries:{phase_boundaries}"
-    )
     chunk_size, eval_seq_len = h.ttt_chunk_size, h.ttt_eval_seq_len
     eval_batch_set = None
     if h.ttt_eval_batches:
@@ -3397,7 +3417,21 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
     global_batches_sorted = _build_ttt_global_batches(
         doc_entries, h, ascending=use_ascending
     )
+    batch_ranges = _parse_ttt_batch_range(h.ttt_batch_range)
+    if batch_ranges is not None:
+        global_batches_sorted = [
+            (orig_batch_idx, batch_entries)
+            for orig_batch_idx, batch_entries in global_batches_sorted
+            if _ttt_batch_in_range(orig_batch_idx + 1, batch_ranges)
+        ]
     queue_len = len(global_batches_sorted)
+    log(
+        "ttt_phased:"
+        f" total_docs:{len(doc_entries)} prefix_docs:{prefix_doc_limit} "
+        f"suffix_docs:{len(doc_entries) - prefix_doc_limit}"
+        f" num_phases:{num_phases} boundaries:{phase_boundaries}"
+        f" batch_range:{h.ttt_batch_range or 'all'} queue_len:{queue_len}"
+    )
     counter_path = f"/tmp/ttt_counter_{h.run_id}"
     prefix_counter_path = f"/tmp/ttt_prefix_counter_{h.run_id}"
     pause_flag_path = f"/tmp/ttt_pause_flag_{h.run_id}"
@@ -4050,39 +4084,46 @@ def train_and_eval(h, device):
 
         def _fwd_ttt(input_ids, target_ids, lora):
             nonlocal _fwd_ttt_compiled_inner
+            if not h.ttt_compile_enabled:
+                return _fwd_ttt_inner(input_ids, target_ids, lora)
             if _fwd_ttt_compiled_inner is None:
                 _fwd_ttt_compiled_inner = torch.compile(_fwd_ttt_inner, dynamic=True)
             return _fwd_ttt_compiled_inner(input_ids, target_ids, lora=lora)
 
         fwd_ttt_compiled = _fwd_ttt
-        log(f"ttt_lora:warming up compile (random tokens, no val data)")
         if BOS_ID is None:
             BOS_ID = 1
         t_warmup = time.perf_counter()
-        warmup_bszes = [h.ttt_batch_size]
-        for bsz in warmup_bszes:
-            wl = BatchedTTTLoRA(
-                bsz, ttt_model, h.ttt_lora_rank,
-                q_lora=h.ttt_q_lora, k_lora=h.ttt_k_lora, v_lora=h.ttt_v_lora,
-                mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
-            ).to(device)
-            wo = torch.optim.AdamW(
-                wl.parameters(),
-                lr=h.ttt_lora_lr * h.ttt_local_lr_mult,
-                betas=(h.ttt_beta1, h.ttt_beta2),
-                eps=1e-10,
-                weight_decay=h.ttt_weight_decay,
-                fused=True,
-            )
-            for ctx_len in (h.ttt_chunk_size, h.ttt_eval_seq_len):
-                xw = torch.randint(0, h.vocab_size, (bsz, ctx_len), device=device, dtype=torch.int64)
-                yw = torch.randint(0, h.vocab_size, (bsz, ctx_len), device=device, dtype=torch.int64)
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    ptl = fwd_ttt_compiled(xw, yw, lora=wl)
-                ptl[:, : min(h.ttt_chunk_size, ctx_len)].mean(dim=-1).sum().backward()
-                wo.step()
-                wo.zero_grad(set_to_none=True)
-            del wl, wo
+        if h.ttt_compile_enabled and not h.ttt_skip_warmup:
+            log(f"ttt_lora:warming up compile (random tokens, no val data)")
+            warmup_bszes = [h.ttt_batch_size]
+            for bsz in warmup_bszes:
+                wl = BatchedTTTLoRA(
+                    bsz, ttt_model, h.ttt_lora_rank,
+                    q_lora=h.ttt_q_lora, k_lora=h.ttt_k_lora, v_lora=h.ttt_v_lora,
+                    mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
+                ).to(device)
+                wo = torch.optim.AdamW(
+                    wl.parameters(),
+                    lr=h.ttt_lora_lr * h.ttt_local_lr_mult,
+                    betas=(h.ttt_beta1, h.ttt_beta2),
+                    eps=1e-10,
+                    weight_decay=h.ttt_weight_decay,
+                    fused=True,
+                )
+                for ctx_len in (h.ttt_chunk_size, h.ttt_eval_seq_len):
+                    xw = torch.randint(0, h.vocab_size, (bsz, ctx_len), device=device, dtype=torch.int64)
+                    yw = torch.randint(0, h.vocab_size, (bsz, ctx_len), device=device, dtype=torch.int64)
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        ptl = fwd_ttt_compiled(xw, yw, lora=wl)
+                    ptl[:, : min(h.ttt_chunk_size, ctx_len)].mean(dim=-1).sum().backward()
+                    wo.step()
+                    wo.zero_grad(set_to_none=True)
+                del wl, wo
+        elif h.ttt_compile_enabled:
+            log("ttt_lora:compile warmup skipped by TTT_SKIP_WARMUP=1")
+        else:
+            log("ttt_lora:torch.compile disabled by TTT_COMPILE_ENABLED=0")
         torch.cuda.empty_cache()
         compile_elapsed = time.perf_counter() - t_warmup
         log(f"ttt_lora:compile warmup done ({compile_elapsed:.1f}s)")
