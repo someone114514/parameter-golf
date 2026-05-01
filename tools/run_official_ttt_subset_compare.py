@@ -7,18 +7,82 @@ import sys
 from pathlib import Path
 
 
+TOKENIZER_NAME = "fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model"
+DATASET_NAME = "fineweb10B_sp8192_lossless_caps_caseops_v1_reserved"
+
+
+BASELINE_ENV = {
+    "SEED": "42",
+    "CASEOPS_ENABLED": "1",
+    "QK_GAIN_INIT": "5.25",
+    "EVAL_SEQ_LEN": "2560",
+    "TTT_EVAL_SEQ_LEN": "2560",
+    "PHASED_TTT_NUM_PHASES": "3",
+    "TTT_LORA_RANK": "80",
+    "TTT_LOCAL_LR_MULT": "0.75",
+    "TTT_BETA2": "0.99",
+    "TTT_WEIGHT_DECAY": "0.5",
+    "EMBED_BITS": "7",
+    "EMBED_CLIP_SIGMAS": "14.0",
+    "MLP_CLIP_SIGMAS": "11.5",
+    "MIN_LR": "0.1",
+    "BETA2": "0.99",
+    "WARMDOWN_FRAC": "0.85",
+    "VAL_LOSS_EVERY": "0",
+    "SMEAR_GATE_ENABLED": "1",
+    "SPARSE_ATTN_GATE_ENABLED": "1",
+    "SPARSE_ATTN_GATE_SCALE": "0.5",
+    "GATED_ATTN_QUANT_GATE": "1",
+    "LQER_ENABLED": "1",
+    "LQER_RANK": "4",
+    "LQER_TOP_K": "3",
+    "LQER_FACTOR_BITS": "4",
+    "LQER_ASYM_ENABLED": "1",
+    "LQER_ASYM_GROUP": "64",
+    "AWQ_LITE_ENABLED": "1",
+    "AWQ_LITE_BITS": "8",
+    "AWQ_LITE_GROUP_TOP_K": "1",
+    "AWQ_LITE_GROUP_SIZE": "64",
+    "ASYM_LOGIT_RESCALE": "1",
+    "COMPRESSOR": "pergroup",
+}
+
+
+def infer_caseops_paths(data_dir):
+    roots = [
+        data_dir,
+        data_dir / "datasets",
+        data_dir / "datasets" / "fineweb10B_sp8192_caseops",
+        data_dir / "datasets" / "fineweb10B_sp8192_caseops" / "datasets",
+    ]
+    tokenizers = [r / "tokenizers" / TOKENIZER_NAME for r in roots]
+    datasets = [r / "datasets" / DATASET_NAME for r in roots]
+    tokenizer = next((p for p in tokenizers if p.exists()), None)
+    dataset = next((p for p in datasets if p.exists()), None)
+    if tokenizer is None:
+        tried = "\n".join(str(p) for p in tokenizers)
+        raise SystemExit(f"missing tokenizer; tried:\n{tried}")
+    if dataset is None:
+        tried = "\n".join(str(p) for p in datasets)
+        raise SystemExit(f"missing dataset; tried:\n{tried}")
+    return tokenizer, dataset
+
+
 def run_one(args, name, mask, q_lora, v_lora):
     env = os.environ.copy()
     lrzip_bin = Path.home() / ".local" / "lrzip" / "usr" / "bin"
     if lrzip_bin.exists():
         env["PATH"] = f"{lrzip_bin}:{env.get('PATH', '')}"
+    tokenizer_path, data_path = infer_caseops_paths(args.data_dir)
+    env.update(BASELINE_ENV)
     env.update(
         {
             "PYTHONUNBUFFERED": "1",
             "RUN_ID": f"{args.run_prefix}_{name}",
             "ARTIFACT_DIR": str(args.artifact_dir),
             "DATA_DIR": str(args.data_dir),
-            "CASEOPS_ENABLED": "1",
+            "DATA_PATH": str(data_path),
+            "TOKENIZER_PATH": str(tokenizer_path),
             "TTT_EVAL_ONLY": "1",
             "TTT_ENABLED": "1",
             "TTT_MASK": mask,
@@ -35,14 +99,15 @@ def run_one(args, name, mask, q_lora, v_lora):
             "TTT_BETA2": str(args.beta2),
             "TTT_CHUNK_SIZE": str(args.chunk_size),
             "TTT_BATCH_SIZE": str(args.batch_size),
-            "PHASED_TTT_PREFIX_DOCS": str(args.prefix_docs),
             "PHASED_TTT_NUM_PHASES": str(args.num_phases),
+            "PHASED_TTT_PREFIX_DOCS": str(args.prefix_docs),
             "EVAL_SUBSET_START_DOC": str(args.start_doc),
             "EVAL_SUBSET_SCALE_PREFIX_DOCS": "1" if args.scale_prefix_docs else "0",
             "TTT_COMPILE_ENABLED": "1" if args.compile else "0",
             "TTT_SKIP_WARMUP": "0" if args.compile else "1",
             "TTT_EVAL_ONLY_DIAG_QUANTIZED": "1" if args.diag_quantized else "0",
-            "COMPRESSOR": "pergroup",
+            "TTT_EVAL_ONLY_DIAG_ONLY": "1" if args.diag_only else "0",
+            "VAL_BATCH_TOKENS": str(args.val_batch_tokens),
         }
     )
     if args.subset_docs:
@@ -73,6 +138,8 @@ def run_one(args, name, mask, q_lora, v_lora):
             f.write(line)
             if "quantized_ttt_phased" in line:
                 result_line = line.strip()
+            elif args.diag_only and "diagnostic quantized eval-only" in line:
+                result_line = line.strip()
     rc = proc.wait()
     if rc != 0:
         raise SystemExit(f"{name} failed with exit code {rc}; see {log_path}")
@@ -92,14 +159,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--submission", default="records/track_10min_16mb/2026-04-30_LongCtx_NoQV_QK525_Prefix2750_Followup/train_gpt.py")
     ap.add_argument("--artifact-dir", default="records/track_10min_16mb/2026-04-30_LongCtx_NoQV_QK525_Prefix2750_Followup")
-    ap.add_argument("--data-dir", default="/tmp/caseops_preflight_again/data")
-    ap.add_argument("--flash-stub", default="tools/run_with_flash_stub.py")
+    ap.add_argument("--data-dir", default="/workspace/caseops_data")
+    ap.add_argument("--flash-stub", default="")
     ap.add_argument("--run-prefix", default="official_qv_1m")
     ap.add_argument("--start-doc", type=int, default=0)
     ap.add_argument("--subset-tokens", type=int, default=1_000_000)
     ap.add_argument("--subset-docs", type=int, default=0)
     ap.add_argument("--prefix-docs", type=int, default=2500)
-    ap.add_argument("--num-phases", type=int, default=1)
+    ap.add_argument("--num-phases", type=int, default=3)
     ap.add_argument("--rank", type=int, default=80)
     ap.add_argument("--alpha", type=float, default=144.0)
     ap.add_argument("--lr", type=float, default=0.0001)
@@ -110,6 +177,8 @@ def main():
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--diag-quantized", action="store_true")
+    ap.add_argument("--diag-only", action="store_true")
+    ap.add_argument("--val-batch-tokens", type=int, default=65536)
     ap.add_argument("--no-scale-prefix-docs", dest="scale_prefix_docs", action="store_false")
     ap.set_defaults(scale_prefix_docs=True)
     args = ap.parse_args()
@@ -126,6 +195,10 @@ def main():
             raise SystemExit(f"missing required path: {path}")
 
     base_line = run_one(args, "base_no_qv", "no_qv", 0, 0)
+    if args.diag_only:
+        print("\n===== official_subset diagnostic summary =====")
+        print(base_line)
+        return
     qv_line = run_one(args, "qv_on", "all", 1, 1)
     base_bpb = parse_bpb(base_line)
     qv_bpb = parse_bpb(qv_line)

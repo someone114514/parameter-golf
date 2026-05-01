@@ -334,6 +334,7 @@ class Hyperparameters:
     ttt_compile_enabled = bool(int(os.environ.get("TTT_COMPILE_ENABLED", "1")))
     ttt_skip_warmup = bool(int(os.environ.get("TTT_SKIP_WARMUP", "0")))
     ttt_eval_only_diag_quantized = bool(int(os.environ.get("TTT_EVAL_ONLY_DIAG_QUANTIZED", "0")))
+    ttt_eval_only_diag_only = bool(int(os.environ.get("TTT_EVAL_ONLY_DIAG_ONLY", "0")))
     global_ttt_lr = float(os.environ.get("GLOBAL_TTT_LR", 0.001))
     global_ttt_momentum = float(os.environ.get("GLOBAL_TTT_MOMENTUM", 0.9))
     global_ttt_epochs = int(os.environ.get("GLOBAL_TTT_EPOCHS", 1))
@@ -3966,6 +3967,9 @@ def train_and_eval(h, device):
             eval_model,
             None,
         )
+        if h.ttt_eval_only_diag_only:
+            log("TTT_EVAL_ONLY_DIAG_ONLY=1 — stopping after quantized diagnostic")
+            return
     if not ttt_eval_only:
         compiled_model = torch.compile(eval_model, dynamic=False, fullgraph=True)
         compiled_forward_logits = torch.compile(
